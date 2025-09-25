@@ -9,6 +9,7 @@ from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QLabel,
     QLineEdit,
@@ -283,6 +284,7 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         self._crypto = CryptoManager(config)
         self._mnemonic = MnemonicManager(config)
         self._qr = QRCodeManager(config)
+        self._mnemonic_word_count = self._mnemonic.default_word_count
 
         self._camera_display: QLabel | None = None
         self._camera_status: QLabel | None = None
@@ -291,6 +293,9 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         self._camera_thread: QThread | None = None
         self._camera_worker: CameraWorker | None = None
         self._cv2_module = None
+
+        self._mnemonic_selector: QComboBox | None = None
+        self._mnemonic_generate_btn: QPushButton | None = None
 
         self._setup_ui()
 
@@ -336,23 +341,38 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         group = QGroupBox("Step 1: Generate Mnemonic")
         group_layout = QVBoxLayout()
 
+        selector_row = QHBoxLayout()
+        selector_label = QLabel("Mnemonic length:")
+        selector_label.setObjectName("SubtleLabel")
+        self._mnemonic_selector = QComboBox()
+        for count in MnemonicManager.valid_word_counts():
+            self._mnemonic_selector.addItem(f"{count} words", count)
+        default_index = self._mnemonic_selector.findData(self._mnemonic_word_count)
+        if default_index >= 0:
+            self._mnemonic_selector.setCurrentIndex(default_index)
+        self._mnemonic_selector.currentIndexChanged.connect(
+            self._on_mnemonic_word_count_changed
+        )
+        selector_row.addWidget(selector_label)
+        selector_row.addWidget(self._mnemonic_selector)
+
         self._mnemonic_display = QTextEdit()
         self._mnemonic_display.setReadOnly(True)
         self._mnemonic_display.setMinimumHeight(110)
         self._mnemonic_display.setFont(QFont(self._style.font_mono, 11))
-        self._mnemonic_display.setPlaceholderText(
-            "Click 'Generate' to create a new 24-word recovery phrase..."
-        )
 
         self._checksum_label = QLabel("Checksum: ----")
         self._checksum_label.setObjectName("ChecksumLabel")
         self._checksum_label.setAlignment(Qt.AlignCenter)
 
-        gen_btn = QPushButton("Generate New 24-Word Mnemonic")
-        gen_btn.setObjectName("AccentButton")
-        gen_btn.clicked.connect(self._generate_mnemonic)
+        self._mnemonic_generate_btn = QPushButton()
+        self._mnemonic_generate_btn.setObjectName("AccentButton")
+        self._mnemonic_generate_btn.clicked.connect(self._generate_mnemonic)
 
-        group_layout.addWidget(gen_btn)
+        self._update_mnemonic_ui_texts()
+
+        group_layout.addLayout(selector_row)
+        group_layout.addWidget(self._mnemonic_generate_btn)
         group_layout.addWidget(QLabel("Write down this phrase and checksum:"))
         group_layout.addWidget(self._mnemonic_display)
         group_layout.addWidget(self._checksum_label)
@@ -388,6 +408,27 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         layout.addStretch()
 
         return tab
+
+    def _update_mnemonic_ui_texts(self) -> None:
+        placeholder = (
+            f"Click 'Generate' to create a new {self._mnemonic_word_count}-word recovery phrase..."
+        )
+        self._mnemonic_display.setPlaceholderText(placeholder)
+        if self._mnemonic_generate_btn is not None:
+            self._mnemonic_generate_btn.setText(
+                f"Generate New {self._mnemonic_word_count}-Word Mnemonic"
+            )
+
+    def _on_mnemonic_word_count_changed(self, index: int) -> None:
+        if self._mnemonic_selector is None:
+            return
+        count = self._mnemonic_selector.itemData(index)
+        if count is None:
+            return
+        self._mnemonic_word_count = int(count)
+        self._mnemonic_display.clear()
+        self._checksum_label.setText("Checksum: ----")
+        self._update_mnemonic_ui_texts()
 
     def _create_decrypt_tab(self) -> QWidget:
         tab = QWidget()
@@ -501,12 +542,16 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
 
     def _generate_mnemonic(self) -> None:
         try:
-            mnemonic = self._mnemonic.generate()
+            mnemonic = self._mnemonic.generate(self._mnemonic_word_count)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Generation failed: {exc}")
             return
 
-        self._mnemonic_display.setText(mnemonic)
+        numbered = "\n".join(
+            f"{index + 1:>2}. {word}"
+            for index, word in enumerate(mnemonic.split())
+        )
+        self._mnemonic_display.setText(numbered)
         self._checksum_label.setText(f"Checksum: {MnemonicManager.checksum(mnemonic)}")
 
         if not self._state.master_password:
