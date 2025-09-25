@@ -1,0 +1,573 @@
+"""PyQt5 user interface for the Secure QR Code Tool."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict
+
+from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QWidget,
+)
+
+from .config import AppConfig, StyleConfig
+from .icon import create_icon
+from .network import is_online
+from .qr import QRCodeManager
+from .security import CryptoManager, MnemonicManager, SecureString
+from .state import AppState
+
+
+class CryptoWorker(QObject):  # pragma: no cover - requires Qt event loop
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, crypto: CryptoManager, mode: str, data: Any, password: SecureString):
+        super().__init__()
+        self._crypto = crypto
+        self._mode = mode
+        self._password = password.copy()
+        self._data = data.copy() if isinstance(data, SecureString) else data
+
+    def run(self) -> None:
+        try:
+            if self._mode == "encrypt":
+                result = self._crypto.encrypt(self._data, self._password)
+            elif self._mode == "decrypt":
+                result = self._crypto.decrypt(self._data, self._password)
+            else:  # pragma: no cover - defensive
+                raise ValueError(f"Unknown crypto mode: {self._mode}")
+        except Exception as exc:
+            self.error.emit(str(exc))
+        else:
+            self.finished.emit(result)
+        finally:
+            if isinstance(self._data, SecureString):
+                self._data.clear()
+            self._password.clear()
+
+
+class LockScreen(QWidget):  # pragma: no cover - requires Qt event loop
+    unlocked = pyqtSignal(SecureString)
+
+    def __init__(self, config: AppConfig, style: StyleConfig):
+        super().__init__()
+        self._config = config
+        self._style = style
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        panel = QWidget()
+        panel.setMaximumWidth(450)
+        panel.setObjectName("CentralPanel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setSpacing(15)
+
+        title = QLabel("Set Master Password")
+        title.setObjectName("HeaderLabel")
+        title.setAlignment(Qt.AlignCenter)
+
+        info = QLabel(
+            "Create a master password for this session.\n"
+            "This password is NOT saved and will encrypt all data."
+        )
+        info.setWordWrap(True)
+        info.setAlignment(Qt.AlignCenter)
+        info.setObjectName("SubtleLabel")
+
+        self._password_input = QLineEdit()
+        self._password_input.setEchoMode(QLineEdit.Password)
+        self._password_input.setPlaceholderText("Enter strong password...")
+        self._password_input.setMinimumHeight(40)
+
+        self._confirm_input = QLineEdit()
+        self._confirm_input.setEchoMode(QLineEdit.Password)
+        self._confirm_input.setPlaceholderText("Confirm password...")
+        self._confirm_input.setMinimumHeight(40)
+
+        unlock_btn = QPushButton("Set Password & Unlock")
+        unlock_btn.setObjectName("AccentButton")
+        unlock_btn.setMinimumHeight(45)
+
+        panel_layout.addWidget(title)
+        panel_layout.addWidget(info)
+        panel_layout.addWidget(QLabel("Password:"))
+        panel_layout.addWidget(self._password_input)
+        panel_layout.addWidget(QLabel("Confirm:"))
+        panel_layout.addWidget(self._confirm_input)
+        panel_layout.addWidget(unlock_btn)
+
+        layout.addWidget(panel)
+
+        unlock_btn.clicked.connect(self._validate_password)
+        self._password_input.returnPressed.connect(self._validate_password)
+        self._confirm_input.returnPressed.connect(self._validate_password)
+
+    def _validate_password(self) -> None:
+        password = self._password_input.text()
+        confirm = self._confirm_input.text()
+
+        if len(password) < self._config.min_password_length:
+            QMessageBox.warning(
+                self,
+                "Weak Password",
+                f"Password must be at least {self._config.min_password_length} characters.",
+            )
+            return
+
+        if password != confirm:
+            QMessageBox.warning(self, "Mismatch", "Passwords don't match.")
+            return
+
+        secure = SecureString(password)
+        self._password_input.clear()
+        self._confirm_input.clear()
+        self.unlocked.emit(secure)
+
+
+class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
+    def __init__(self, app: "SecureQRApp", config: AppConfig, state: AppState, style: StyleConfig):
+        super().__init__()
+        self._app = app
+        self._config = config
+        self._state = state
+        self._style = style
+
+        self._crypto = CryptoManager(config)
+        self._mnemonic = MnemonicManager(config)
+        self._qr = QRCodeManager(config)
+
+        self._camera_display: QLabel | None = None
+        self._camera_status: QLabel | None = None
+
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        self._network_banner = QLabel()
+        self._network_banner.setAlignment(Qt.AlignCenter)
+        self._network_banner.setStyleSheet("padding: 8px; font-weight: bold;")
+        self._update_network_status()
+
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._create_generate_tab(), "Generate & Encrypt")
+        self._tabs.addTab(self._create_decrypt_tab(), "Read & Decrypt")
+
+        layout.addWidget(self._network_banner)
+        layout.addWidget(self._tabs)
+
+        self._network_timer = QTimer()
+        self._network_timer.timeout.connect(self._update_network_status)
+        self._network_timer.start(self._config.network_check_interval_ms)
+
+    def _update_network_status(self) -> None:
+        self._state.is_online = is_online()
+        if self._state.is_online:
+            self._network_banner.setText("⚠️ ONLINE - Disconnect for maximum security")
+            self._network_banner.setObjectName("WarningLabel")
+        else:
+            self._network_banner.setText("✔️ OFFLINE - Air-gapped and secure")
+            self._network_banner.setObjectName("SuccessLabel")
+        self._network_banner.style().polish(self._network_banner)
+
+    def _create_generate_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+        layout.addStretch()
+
+        panel = QWidget()
+        panel.setObjectName("CentralPanel")
+        panel.setMaximumWidth(800)
+        panel_layout = QVBoxLayout(panel)
+
+        group = QGroupBox("Step 1: Generate Mnemonic")
+        group_layout = QVBoxLayout()
+
+        self._mnemonic_display = QTextEdit()
+        self._mnemonic_display.setReadOnly(True)
+        self._mnemonic_display.setMinimumHeight(110)
+        self._mnemonic_display.setFont(QFont(self._style.font_mono, 11))
+        self._mnemonic_display.setPlaceholderText(
+            "Click 'Generate' to create a new 24-word recovery phrase..."
+        )
+
+        self._checksum_label = QLabel("Checksum: ----")
+        self._checksum_label.setObjectName("ChecksumLabel")
+        self._checksum_label.setAlignment(Qt.AlignCenter)
+
+        gen_btn = QPushButton("Generate New 24-Word Mnemonic")
+        gen_btn.setObjectName("AccentButton")
+        gen_btn.clicked.connect(self._generate_mnemonic)
+
+        group_layout.addWidget(gen_btn)
+        group_layout.addWidget(QLabel("Write down this phrase and checksum:"))
+        group_layout.addWidget(self._mnemonic_display)
+        group_layout.addWidget(self._checksum_label)
+        group.setLayout(group_layout)
+
+        save_group = QGroupBox("Step 2: Save Encrypted Data")
+        save_layout = QVBoxLayout()
+
+        self._qr_preview = QLabel("QR code will appear here")
+        self._qr_preview.setObjectName("qrDisplayLabel")
+        self._qr_preview.setAlignment(Qt.AlignCenter)
+        self._qr_preview.setMinimumSize(256, 256)
+
+        if self._qr.is_available():
+            save_qr_btn = QPushButton("Save as QR Image")
+            save_qr_btn.clicked.connect(self._save_as_qr)
+            save_layout.addWidget(save_qr_btn)
+        else:
+            info = QLabel("Install 'segno' for QR support: pip install segno[pil]")
+            info.setWordWrap(True)
+            save_layout.addWidget(info)
+
+        save_json_btn = QPushButton("Save as JSON File")
+        save_json_btn.clicked.connect(self._save_as_json)
+
+        save_layout.addWidget(self._qr_preview)
+        save_layout.addWidget(save_json_btn)
+        save_group.setLayout(save_layout)
+
+        panel_layout.addWidget(group)
+        panel_layout.addWidget(save_group)
+        layout.addWidget(panel)
+        layout.addStretch()
+
+        return tab
+
+    def _create_decrypt_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+        layout.addStretch()
+
+        panel = QWidget()
+        panel.setObjectName("CentralPanel")
+        panel.setMaximumWidth(800)
+        panel_layout = QVBoxLayout(panel)
+
+        load_group = QGroupBox("Step 1: Load Encrypted Data")
+        load_layout = QVBoxLayout()
+
+        self._load_stack = QStackedWidget()
+
+        btn_page = QWidget()
+        btn_layout = QVBoxLayout(btn_page)
+
+        load_qr_btn = QPushButton("Load QR Image File")
+        load_qr_btn.clicked.connect(self._load_qr_file)
+        btn_layout.addWidget(load_qr_btn)
+
+        load_json_btn = QPushButton("Load JSON File")
+        load_json_btn.clicked.connect(self._load_json_file)
+        btn_layout.addWidget(load_json_btn)
+
+        self._load_stack.addWidget(btn_page)
+
+        self._loaded_label = QLabel("No data loaded")
+        self._loaded_label.setAlignment(Qt.AlignCenter)
+
+        load_layout.addWidget(self._load_stack)
+        load_layout.addWidget(self._loaded_label)
+        load_group.setLayout(load_layout)
+
+        decrypt_group = QGroupBox("Step 2: Decrypted Data")
+        decrypt_layout = QVBoxLayout()
+
+        self._decrypted_display = QTextEdit()
+        self._decrypted_display.setReadOnly(True)
+        self._decrypted_display.setMinimumHeight(110)
+        self._decrypted_display.setFont(QFont(self._style.font_mono, 11))
+        self._decrypted_display.setPlaceholderText("Decrypted content will appear here...")
+
+        self._verify_checksum = QLabel("Checksum: ----")
+        self._verify_checksum.setAlignment(Qt.AlignCenter)
+        self._verify_checksum.setObjectName("ChecksumLabel")
+
+        decrypt_layout.addWidget(QLabel("Decrypted Mnemonic:"))
+        decrypt_layout.addWidget(self._decrypted_display)
+        decrypt_layout.addWidget(self._verify_checksum)
+        decrypt_group.setLayout(decrypt_layout)
+
+        panel_layout.addWidget(load_group)
+        panel_layout.addWidget(decrypt_group)
+        layout.addWidget(panel)
+        layout.addStretch()
+
+        return tab
+
+    def _generate_mnemonic(self) -> None:
+        try:
+            mnemonic = self._mnemonic.generate()
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Generation failed: {exc}")
+            return
+
+        self._mnemonic_display.setText(mnemonic)
+        self._checksum_label.setText(f"Checksum: {MnemonicManager.checksum(mnemonic)}")
+
+        if not self._state.master_password:
+            QMessageBox.critical(self, "Error", "No master password set")
+            return
+
+        self._app.start_crypto("encrypt", SecureString(mnemonic), self._state.master_password)
+
+    def handle_encrypted(self, payload: Dict[str, str]) -> None:
+        self._state.current_encrypted_payload = payload
+        if not self._qr.is_available():
+            self._qr_preview.setText("QR generation not available")
+            return
+
+        try:
+            pixmap = self._qr.to_qpixmap(json.dumps(payload))
+        except Exception as exc:
+            self._qr_preview.setText(f"QR preview failed: {exc}")
+            return
+
+        scaled = pixmap.scaled(self._qr_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._qr_preview.setPixmap(scaled)
+
+    def _save_as_qr(self) -> None:
+        if not self._state.current_encrypted_payload:
+            QMessageBox.warning(self, "Error", "No data to save")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save QR Code", "", "PNG Images (*.png)")
+        if not path:
+            return
+
+        try:
+            self._qr.save_png(json.dumps(self._state.current_encrypted_payload), path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Save failed: {exc}")
+        else:
+            QMessageBox.information(self, "Success", "QR code saved successfully")
+
+    def _save_as_json(self) -> None:
+        if not self._state.current_encrypted_payload:
+            QMessageBox.warning(self, "Error", "No data to save")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save JSON", "", "JSON Files (*.json)")
+        if not path:
+            return
+
+        data = {
+            "app": self._config.app_name,
+            "version": self._config.app_version,
+            "payload": self._state.current_encrypted_payload,
+        }
+
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2)
+        except OSError as exc:
+            QMessageBox.critical(self, "Error", f"Save failed: {exc}")
+        else:
+            QMessageBox.information(self, "Success", "JSON saved successfully")
+
+    def _load_qr_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open QR Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not path:
+            return
+
+        data = self._qr.read_from_file(path)
+        if not data:
+            QMessageBox.critical(self, "Error", "Failed to read QR from image")
+            return
+
+        self._process_loaded_data(data, f"Loaded: {Path(path).name}")
+
+    def _load_json_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open JSON", "", "JSON Files (*.json)")
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.critical(self, "Error", f"Load failed: {exc}")
+            return
+
+        if "payload" not in data:
+            QMessageBox.critical(self, "Error", "Invalid JSON format - missing 'payload'")
+            return
+
+        self._process_loaded_data(json.dumps(data["payload"]), f"Loaded: {Path(path).name}")
+
+    def _process_loaded_data(self, payload: str, source: str) -> None:
+        try:
+            payload_dict = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            QMessageBox.critical(self, "Error", f"Invalid JSON data: {exc}")
+            return
+
+        self._loaded_label.setText(source)
+
+        if not self._state.master_password:
+            QMessageBox.critical(self, "Error", "No master password set")
+            return
+
+        self._app.start_crypto("decrypt", payload_dict, self._state.master_password)
+
+    def handle_decrypted(self, result: SecureString) -> None:
+        try:
+            text = result.get()
+            self._decrypted_display.setText(text)
+            self._verify_checksum.setText(f"Checksum: {MnemonicManager.checksum(text)}")
+        finally:
+            result.clear()
+
+
+class SecureQRApp(QMainWindow):  # pragma: no cover - requires Qt event loop
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._config = AppConfig()
+        self._style = StyleConfig()
+        self._state = AppState()
+
+        self._crypto_thread: QThread | None = None
+        self._crypto_worker: CryptoWorker | None = None
+        self._main_window: MainWindow | None = None
+
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        self.setWindowTitle(f"{self._config.app_name} v{self._config.app_version}")
+        self.setGeometry(100, 100, 850, 750)
+        self.setMinimumSize(700, 650)
+
+        try:
+            self.setWindowIcon(create_icon())
+        except RuntimeError:
+            pass
+
+        self._apply_stylesheet()
+
+        self._stack = QStackedWidget()
+        self._lock_screen = LockScreen(self._config, self._style)
+        self._lock_screen.unlocked.connect(self._on_unlocked)
+        self._stack.addWidget(self._lock_screen)
+        self.setCentralWidget(self._stack)
+
+        self.show()
+
+    def _apply_stylesheet(self) -> None:
+        style = self._style
+        self.setStyleSheet(
+            f"""
+            QMainWindow {{ background: {style.bg_primary}; }}
+            QWidget {{ color: {style.fg_primary}; font-family: {style.font_family}; font-size: {style.font_size}px; }}
+            QTabWidget::pane {{ border: none; }}
+            QTabBar::tab {{ background: {style.bg_secondary}; padding: 12px 20px; border: 1px solid {style.border}; border-bottom: none; border-top-left-radius: 5px; border-top-right-radius: 5px; }}
+            QTabBar::tab:selected {{ background: {style.bg_tertiary}; color: {style.fg_secondary}; }}
+            QGroupBox {{ font-weight: bold; border: 1px solid {style.border}; border-radius: 8px; margin-top: 1ex; padding: 15px; background: {style.bg_secondary}; }}
+            QLineEdit, QTextEdit {{ background: {style.bg_primary}; color: {style.fg_secondary}; border: 1px solid {style.border}; border-radius: 4px; padding: 10px; }}
+            QLineEdit:focus, QTextEdit:focus {{ border: 1px solid {style.accent_primary}; }}
+            QPushButton {{ background: {style.accent_secondary}; color: {style.fg_secondary}; border: none; padding: 12px 18px; border-radius: 4px; font-weight: bold; }}
+            QPushButton#AccentButton {{ background: {style.accent_primary}; color: {style.bg_primary}; }}
+            QPushButton:hover {{ background: #81A1C1; }}
+            #HeaderLabel {{ font-size: 24px; font-weight: bold; color: {style.fg_secondary}; }}
+            #SubtleLabel {{ color: #81A1C1; }}
+            #WarningLabel {{ background: {style.warning}; color: {style.bg_primary}; padding: 8px; border-radius: 4px; }}
+            #SuccessLabel {{ background: {style.success}; color: {style.bg_primary}; padding: 8px; border-radius: 4px; }}
+            #ChecksumLabel {{ font-family: {style.font_mono}; font-size: 16px; color: #EBCB8B; font-weight: bold; }}
+            #CentralPanel {{ background: {style.bg_tertiary}; border-radius: 8px; padding: 20px; }}
+            #qrDisplayLabel {{ border: 2px dashed {style.border}; background: {style.bg_primary}; border-radius: 4px; }}
+            """
+        )
+
+    def _on_unlocked(self, password: SecureString) -> None:
+        self._state.master_password = password
+        self._main_window = MainWindow(self, self._config, self._state, self._style)
+        self._stack.addWidget(self._main_window)
+        self._stack.setCurrentWidget(self._main_window)
+        self.resize(850, 850)
+
+    def start_crypto(self, mode: str, data: Any, password: SecureString) -> None:
+        self.stop_crypto()
+        if self._main_window:
+            self._main_window.setEnabled(False)
+
+        thread = QThread()
+        worker = CryptoWorker(CryptoManager(self._config), mode, data, password)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_crypto_finished)
+        worker.error.connect(self._on_crypto_error)
+        thread.finished.connect(thread.deleteLater)
+        self._crypto_thread = thread
+        self._crypto_worker = worker
+        thread.start()
+
+    def _on_crypto_finished(self, result: object) -> None:
+        try:
+            if not self._crypto_worker:
+                return
+
+            if self._crypto_worker._mode == "encrypt":
+                assert isinstance(self._main_window, MainWindow)
+                self._main_window.handle_encrypted(result)  # type: ignore[arg-type]
+            else:
+                assert isinstance(self._main_window, MainWindow)
+                assert isinstance(result, SecureString)
+                self._main_window.handle_decrypted(result)
+        finally:
+            self.stop_crypto()
+
+    def _on_crypto_error(self, message: str) -> None:
+        QMessageBox.critical(self, "Crypto Error", message)
+        self.stop_crypto()
+
+    def stop_crypto(self) -> None:
+        if self._main_window:
+            self._main_window.setEnabled(True)
+
+        if self._crypto_thread and self._crypto_thread.isRunning():
+            self._crypto_thread.quit()
+            if not self._crypto_thread.wait(2000):
+                self._crypto_thread.terminate()
+                self._crypto_thread.wait()
+        self._crypto_thread = None
+        self._crypto_worker = None
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.stop_crypto()
+        if self._state.master_password:
+            self._state.master_password.clear()
+        self._state.master_password = None
+        self._state.current_encrypted_payload = None
+        event.accept()
+
+
+def run() -> int:  # pragma: no cover - requires Qt event loop
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("Secure QR Code Tool")
+    window = SecureQRApp()
+    return app.exec_()
+
+
+__all__ = ["run", "SecureQRApp"]
