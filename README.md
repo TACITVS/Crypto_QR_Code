@@ -52,6 +52,12 @@ secure-qr-tool
 On environments without a GUI you can still leverage the encryption helpers by
 importing the package in your own scripts.
 
+## Cryptographic specification
+
+The cryptographic architecture, including the PBKDF2 parameters, AES-256-GCM
+usage and QR payload hashing strategy, is documented in
+[`docs/cryptography.md`](docs/cryptography.md).
+
 ## Tests
 
 Run the automated test-suite with:
