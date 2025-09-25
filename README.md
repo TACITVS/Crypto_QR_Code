@@ -62,11 +62,51 @@ serialization rules, refer to [`docs/encryption_protocol.md`](docs/encryption_pr
 
 ## Tests
 
-Run the automated test-suite with:
+The automated checks live under [`tests/`](tests/) and are executed with
+[`pytest`](https://docs.pytest.org/). Run the complete suite with:
 
 ```bash
 pytest
 ```
+
+The test modules contain small, focused examples that illustrate how the core
+APIs are meant to be used:
+
+- **`tests/test_qr.py`**
+  - `test_payload_digest_matches_sha256` instantiates
+    [`QRCodeManager`](src/secure_qr_tool/qr.py) and verifies that calling
+    `payload_digest` twice with the same JSON payload returns the same
+    SHA-256 hex digest. The assertion also checks that the digest has the
+    expected 64 hexadecimal characters (256 bits). You can experiment with the
+    helper interactively by running `python -m secure_qr_tool.qr` in a REPL and
+    calling `QRCodeManager().payload_digest('{"salt": "abc"}')`.
+  - `test_save_png_returns_digest` uses `monkeypatch` to replace the optional
+    [`segno`](https://segno.readthedocs.io/) dependency with a dummy QR object.
+    It asserts that `save_png` still returns the digest when the QR code writer
+    is mocked, demonstrating how to test code paths that depend on external
+    libraries.
+- **`tests/test_security.py`**
+  - `test_secure_string_clears_buffer` constructs a [`SecureString`](src/secure_qr_tool/security.py)
+    to show how secrets can be wiped from memory by calling `.clear()`.
+  - `test_encrypt_roundtrip` encrypts a mnemonic using [`CryptoManager`](src/secure_qr_tool/security.py),
+    confirms that the payload contains the `salt`, `nonce`, `ciphertext`, and
+    `version` fields, and then decrypts the payload to prove that the original
+    text is recovered.
+  - `test_decrypt_rejects_invalid_payload` demonstrates the validation logic by
+    passing an incomplete payload to `decrypt` and asserting that a `ValueError`
+    is raised.
+  - `test_mnemonic_checksum_length` and `test_mnemonic_word_counts` use
+    [`MnemonicManager`](src/secure_qr_tool/security.py) to generate recovery
+    phrases. They show how to request the default number of words, validate the
+    phrase, compute its checksum (six characters), and iterate through all
+    supported BIP-39 word counts.
+  - `test_invalid_mnemonic_word_count_raises` provides an example of the guard
+    rails around unsupported word counts by asserting that requesting 15 words
+    raises a `ValueError`.
+
+These examples double as living documentation—reading the tests gives you
+concrete usage patterns for the cryptographic and QR helpers while ensuring
+regressions are caught automatically.
 
 ## Screenshot
 
