@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <rect width="960" height="600" fill="#2E3440" />
+  <rect x="40" y="40" width="880" height="520" rx="20" ry="20" fill="#3B4252" stroke="#88C0D0" stroke-width="4" />
+  <text x="80" y="100" font-family="Segoe UI" font-size="32" fill="#ECEFF4">Secure QR Code Tool</text>
+  <text x="80" y="150" font-family="Segoe UI" font-size="20" fill="#D8DEE9">Main application layout showcasing the mnemonic generation and encryption workflow.</text>
+  <rect x="80" y="180" width="360" height="340" rx="12" ry="12" fill="#434C5E" stroke="#4C566A" stroke-width="3" />
+  <text x="110" y="220" font-family="Segoe UI" font-size="22" fill="#ECEFF4">Generate &amp; Encrypt</text>
+  <text x="110" y="260" font-family="Courier New" font-size="18" fill="#EBCB8B">mnemonic phrase...</text>
+  <rect x="480" y="180" width="360" height="340" rx="12" ry="12" fill="#434C5E" stroke="#4C566A" stroke-width="3" />
+  <text x="510" y="220" font-family="Segoe UI" font-size="22" fill="#ECEFF4">Decryption Preview</text>
+  <rect x="520" y="260" width="240" height="240" rx="12" ry="12" fill="#2E3440" stroke="#88C0D0" stroke-width="3" />
+  <text x="540" y="390" font-family="Segoe UI" font-size="20" fill="#ECEFF4">QR Preview</text>
+  <rect x="80" y="540" width="360" height="40" fill="#88C0D0" rx="6" ry="6" />
+  <text x="180" y="566" font-family="Segoe UI" font-size="18" fill="#2E3440">Save as QR / JSON</text>
+  <rect x="480" y="540" width="360" height="40" fill="#5E81AC" rx="6" ry="6" />
+  <text x="600" y="566" font-family="Segoe UI" font-size="18" fill="#ECEFF4">Checksum Display</text>
+</svg>
