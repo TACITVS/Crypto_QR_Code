@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -115,7 +116,7 @@ class CryptoManager:
             salt = base64.b64decode(payload["salt"])
             nonce = base64.b64decode(payload["nonce"])
             ciphertext = base64.b64decode(payload["ciphertext"])
-        except (TypeError, binascii.Error) as exc:  # pragma: no cover - hard to trigger intentionally
+        except (TypeError, binascii.Error) as exc:
             raise ValueError("Payload contains invalid base64 data") from exc
 
         key = self._derive_key(password, salt)
@@ -123,7 +124,11 @@ class CryptoManager:
 
         try:
             plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-        except Exception as exc:  # pragma: no cover - depends on ciphertext
+        except InvalidTag as exc:
+            raise ValueError("Decryption failed: authentication error") from exc
+        except ValueError as exc:
+            raise ValueError(f"Decryption failed: {exc}") from exc
+        except Exception as exc:  # pragma: no cover - defensive
             raise ValueError("Decryption failed") from exc
 
         return SecureString(plaintext)

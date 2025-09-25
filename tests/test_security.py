@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from secure_qr_tool.config import AppConfig
@@ -34,6 +36,46 @@ def test_decrypt_rejects_invalid_payload(config: AppConfig):
 
     with pytest.raises(ValueError):
         crypto.decrypt({"salt": ""}, password)
+
+
+def test_decrypt_rejects_invalid_base64(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+
+    payload = {
+        "salt": "?bad",
+        "nonce": "?bad",
+        "ciphertext": "?bad",
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        crypto.decrypt(payload, password)
+
+    assert str(excinfo.value) == "Payload contains invalid base64 data"
+
+
+def test_decrypt_with_wrong_password(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload = crypto.encrypt(SecureString("secret"), password)
+
+    wrong_password = SecureString("B" * config.min_password_length)
+    with pytest.raises(ValueError) as excinfo:
+        crypto.decrypt(payload, wrong_password)
+
+    assert "authentication error" in str(excinfo.value)
+
+
+def test_decrypt_with_invalid_nonce_length(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload = crypto.encrypt(SecureString("secret"), password)
+    payload["nonce"] = base64.b64encode(b"short").decode("ascii")
+
+    with pytest.raises(ValueError) as excinfo:
+        crypto.decrypt(payload, password)
+
+    assert "Nonce" in str(excinfo.value) or "between" in str(excinfo.value)
 
 
 def test_mnemonic_checksum_length(config: AppConfig):
