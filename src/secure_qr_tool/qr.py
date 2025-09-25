@@ -1,6 +1,7 @@
 """QR code generation utilities."""
 from __future__ import annotations
 
+import hashlib
 import io
 from dataclasses import dataclass
 from typing import Optional
@@ -21,8 +22,23 @@ class QRCodeManager:
             return False
         return True
 
-    def save_png(self, data: str, path: str) -> None:
-        """Persist a QR code representing ``data`` to ``path``."""
+    def payload_digest(self, data: str) -> str:
+        """Return the SHA-256 digest of the QR payload.
+
+        The digest allows callers to verify that a decoded payload matches the
+        original data that was serialised into a QR code.  The method returns the
+        digest as a hexadecimal string to avoid introducing binary data into the
+        workflow.
+        """
+
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    def save_png(self, data: str, path: str) -> str:
+        """Persist a QR code representing ``data`` to ``path``.
+
+        The method returns the SHA-256 digest of ``data`` so that callers can
+        display or record the checksum alongside the generated QR image.
+        """
 
         try:
             import segno  # type: ignore  # pragma: no cover - optional dependency
@@ -31,6 +47,8 @@ class QRCodeManager:
 
         qr = segno.make(data, error=self.config.qr_error_correction)
         qr.save(path, scale=self.config.qr_scale, border=self.config.qr_border)
+
+        return self.payload_digest(data)
 
     def to_qpixmap(self, data: str):  # pragma: no cover - requires PyQt at runtime
         """Return a ``QPixmap`` representing ``data``.
