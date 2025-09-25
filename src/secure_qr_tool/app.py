@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .config import AppConfig, StyleConfig
+from .config import AppConfig, CameraConfig, StyleConfig
 from .icon import create_icon
 from .network import is_online
 from .qr import QRCodeManager
@@ -142,13 +142,143 @@ class LockScreen(QWidget):  # pragma: no cover - requires Qt event loop
         self.unlocked.emit(secure)
 
 
+class CameraWorker(QObject):  # pragma: no cover - requires Qt event loop
+    """Background worker that streams frames from the system camera."""
+
+    frame_captured = pyqtSignal(object)
+    decoded = pyqtSignal(str)
+    status = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, config: AppConfig, camera_config: CameraConfig):
+        super().__init__()
+        self._config = config
+        self._camera_config = camera_config
+        self._running = False
+        self._cv2 = None
+        self._pyzbar = None
+
+    def stop(self) -> None:
+        self._running = False
+
+    # The imports inside ``run`` keep the module importable in environments
+    # without optional camera dependencies.  The method is intentionally
+    # verbose to provide actionable status updates to the UI.
+    def run(self) -> None:
+        try:
+            import cv2  # type: ignore
+            from pyzbar import pyzbar  # type: ignore
+        except Exception:
+            self.status.emit("Camera dependencies not installed")
+            self.finished.emit()
+            return
+
+        self._cv2 = cv2
+        self._pyzbar = pyzbar
+
+        capture = self._open_capture()
+        if capture is None:
+            self.status.emit("Unable to access camera")
+            self.finished.emit()
+            return
+
+        self._running = True
+        frame_skip = max(1, self._config.camera_frame_skip)
+        frame_counter = 0
+
+        self.status.emit("Camera active – align QR code")
+
+        try:
+            while self._running:
+                success, frame = capture.read()
+                if not success or frame is None:
+                    self.status.emit("Camera feed unavailable")
+                    break
+
+                frame = self._resize_frame(frame)
+                self.frame_captured.emit(frame)
+
+                frame_counter += 1
+                if frame_counter % frame_skip:
+                    continue
+
+                decoded = self._decode_frame(frame)
+                if decoded:
+                    self.decoded.emit(decoded)
+                    break
+        finally:
+            self._running = False
+            capture.release()
+            self.finished.emit()
+
+    def _open_capture(self):
+        assert self._cv2 is not None
+        config = self._camera_config
+
+        default_backend = getattr(self._cv2, "CAP_ANY", 0)
+        for backend in config.get_backends() or [default_backend]:
+            for index in config.get_indices():
+                try:
+                    capture = self._cv2.VideoCapture(index, backend)
+                except TypeError:
+                    capture = self._cv2.VideoCapture(index)
+                if not capture or not capture.isOpened():
+                    if capture:
+                        capture.release()
+                    continue
+
+                capture.set(self._cv2.CAP_PROP_FRAME_WIDTH, config.width)
+                capture.set(self._cv2.CAP_PROP_FRAME_HEIGHT, config.height)
+                return capture
+        return None
+
+    def _resize_frame(self, frame):
+        assert self._cv2 is not None
+        max_dim = max(frame.shape[:2])
+        limit = self._config.max_frame_size
+        if max_dim <= limit:
+            return frame
+
+        scale = limit / float(max_dim)
+        new_size = (int(frame.shape[1] * scale), int(frame.shape[0] * scale))
+        return self._cv2.resize(frame, new_size)
+
+    def _decode_frame(self, frame):
+        assert self._cv2 is not None and self._pyzbar is not None
+        gray = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2GRAY)
+        candidates = [
+            gray,
+            self._cv2.GaussianBlur(gray, (5, 5), 0),
+            self._cv2.threshold(
+                gray,
+                0,
+                255,
+                self._cv2.THRESH_BINARY + self._cv2.THRESH_OTSU,
+            )[1],
+        ]
+
+        for processed in candidates:
+            decoded = self._pyzbar.decode(processed)
+            if decoded:
+                return decoded[0].data.decode("utf-8", errors="ignore")
+        return None
+
+
 class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
-    def __init__(self, app: "SecureQRApp", config: AppConfig, state: AppState, style: StyleConfig):
+    def __init__(
+        self,
+        app: "SecureQRApp",
+        config: AppConfig,
+        state: AppState,
+        style: StyleConfig,
+        camera_config: CameraConfig,
+    ):
         super().__init__()
         self._app = app
         self._config = config
         self._state = state
         self._style = style
+        self._camera_config = camera_config
 
         self._crypto = CryptoManager(config)
         self._mnemonic = MnemonicManager(config)
@@ -156,6 +286,11 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
 
         self._camera_display: QLabel | None = None
         self._camera_status: QLabel | None = None
+        self._camera_start_btn: QPushButton | None = None
+        self._camera_stop_btn: QPushButton | None = None
+        self._camera_thread: QThread | None = None
+        self._camera_worker: CameraWorker | None = None
+        self._cv2_module = None
 
         self._setup_ui()
 
@@ -289,6 +424,8 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         load_layout.addWidget(self._loaded_label)
         load_group.setLayout(load_layout)
 
+        camera_group = self._create_camera_group()
+
         decrypt_group = QGroupBox("Step 2: Decrypted Data")
         decrypt_layout = QVBoxLayout()
 
@@ -308,11 +445,59 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         decrypt_group.setLayout(decrypt_layout)
 
         panel_layout.addWidget(load_group)
+        if camera_group is not None:
+            panel_layout.addWidget(camera_group)
         panel_layout.addWidget(decrypt_group)
         layout.addWidget(panel)
         layout.addStretch()
 
         return tab
+
+    def _create_camera_group(self) -> QWidget | None:
+        try:
+            import cv2  # type: ignore
+        except Exception:
+            self._state.camera_available = False
+            return None
+
+        try:
+            from pyzbar import pyzbar  # type: ignore  # noqa: F401
+        except Exception:
+            self._state.camera_available = False
+            return None
+
+        self._state.camera_available = True
+        self._cv2_module = cv2
+
+        group = QGroupBox("Or Scan Using Camera")
+        layout = QVBoxLayout()
+
+        self._camera_display = QLabel("Camera preview will appear here")
+        self._camera_display.setObjectName("qrDisplayLabel")
+        self._camera_display.setAlignment(Qt.AlignCenter)
+        self._camera_display.setMinimumSize(320, 240)
+
+        self._camera_status = QLabel("Camera idle")
+        self._camera_status.setAlignment(Qt.AlignCenter)
+        self._camera_status.setObjectName("SubtleLabel")
+
+        button_row = QHBoxLayout()
+        self._camera_start_btn = QPushButton("Start Camera Scan")
+        self._camera_stop_btn = QPushButton("Stop Camera")
+        self._camera_stop_btn.setEnabled(False)
+
+        self._camera_start_btn.clicked.connect(self._start_camera)
+        self._camera_stop_btn.clicked.connect(self._stop_camera)
+
+        button_row.addWidget(self._camera_start_btn)
+        button_row.addWidget(self._camera_stop_btn)
+
+        layout.addWidget(self._camera_display)
+        layout.addLayout(button_row)
+        layout.addWidget(self._camera_status)
+
+        group.setLayout(layout)
+        return group
 
     def _generate_mnemonic(self) -> None:
         try:
@@ -439,12 +624,97 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         finally:
             result.clear()
 
+    def _start_camera(self) -> None:
+        if not self._state.camera_available or self._camera_thread:
+            return
+
+        self._camera_status.setText("Initialising camera…")
+        assert self._camera_start_btn is not None and self._camera_stop_btn is not None
+        self._camera_start_btn.setEnabled(False)
+        self._camera_stop_btn.setEnabled(True)
+
+        worker = CameraWorker(self._config, self._camera_config)
+        thread = QThread()
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.frame_captured.connect(self._on_camera_frame)
+        worker.decoded.connect(self._on_camera_decoded)
+        worker.status.connect(self._on_camera_status)
+        worker.finished.connect(self._on_camera_finished)
+        thread.finished.connect(thread.deleteLater)
+
+        self._camera_thread = thread
+        self._camera_worker = worker
+        thread.start()
+
+    def _stop_camera(self) -> None:
+        if self._camera_worker:
+            self._camera_worker.stop()
+        if self._camera_thread and self._camera_thread.isRunning():
+            self._camera_thread.quit()
+            self._camera_thread.wait(1500)
+        self._camera_thread = None
+        self._camera_worker = None
+
+        if self._camera_display:
+            self._camera_display.clear()
+            self._camera_display.setText("Camera preview will appear here")
+
+        if self._camera_start_btn and self._camera_stop_btn:
+            self._camera_start_btn.setEnabled(True)
+            self._camera_stop_btn.setEnabled(False)
+
+        if self._camera_status and "QR detected" not in self._camera_status.text():
+            self._camera_status.setText("Camera stopped")
+
+    def _on_camera_frame(self, frame) -> None:
+        if not self._camera_display or self._cv2_module is None:
+            return
+
+        rgb = self._cv2_module.cvtColor(frame, self._cv2_module.COLOR_BGR2RGB)
+        height, width, channel = rgb.shape
+        image = QImage(rgb.data, width, height, channel * width, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(image.copy())
+        target_size = self._camera_display.size()
+        if target_size.width() and target_size.height():
+            pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._camera_display.setPixmap(pixmap)
+
+    def _on_camera_decoded(self, payload: str) -> None:
+        if self._camera_status:
+            self._camera_status.setText("QR detected – decrypting…")
+        self._stop_camera()
+        self._process_loaded_data(payload, "Scanned from Camera")
+
+    def _on_camera_status(self, message: str) -> None:
+        if self._camera_status:
+            self._camera_status.setText(message)
+
+    def _on_camera_finished(self) -> None:
+        if self._camera_thread and self._camera_thread.isRunning():
+            self._camera_thread.quit()
+            self._camera_thread.wait(1500)
+        self._camera_thread = None
+        self._camera_worker = None
+
+        if self._camera_start_btn and self._camera_stop_btn:
+            self._camera_start_btn.setEnabled(True)
+            self._camera_stop_btn.setEnabled(False)
+
+        if self._camera_status and self._camera_status.text() == "Initialising camera…":
+            self._camera_status.setText("Camera unavailable")
+
+    def stop_camera(self) -> None:
+        self._stop_camera()
+
 
 class SecureQRApp(QMainWindow):  # pragma: no cover - requires Qt event loop
     def __init__(self) -> None:
         super().__init__()
 
         self._config = AppConfig()
+        self._camera_config = CameraConfig()
         self._style = StyleConfig()
         self._state = AppState()
 
@@ -501,7 +771,13 @@ class SecureQRApp(QMainWindow):  # pragma: no cover - requires Qt event loop
 
     def _on_unlocked(self, password: SecureString) -> None:
         self._state.master_password = password
-        self._main_window = MainWindow(self, self._config, self._state, self._style)
+        self._main_window = MainWindow(
+            self,
+            self._config,
+            self._state,
+            self._style,
+            self._camera_config,
+        )
         self._stack.addWidget(self._main_window)
         self._stack.setCurrentWidget(self._main_window)
         self.resize(850, 850)
@@ -556,6 +832,8 @@ class SecureQRApp(QMainWindow):  # pragma: no cover - requires Qt event loop
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.stop_crypto()
+        if self._main_window:
+            self._main_window.stop_camera()
         if self._state.master_password:
             self._state.master_password.clear()
         self._state.master_password = None
