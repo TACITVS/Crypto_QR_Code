@@ -133,14 +133,41 @@ class CryptoManager:
 class MnemonicManager:
     """Utility wrapper around the ``mnemonic`` package."""
 
+    _WORD_COUNT_TO_STRENGTH = {12: 128, 18: 192, 24: 256}
+
     config: AppConfig
     _mnemonic: Mnemonic = field(init=False, repr=False)
+    _default_word_count: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_mnemonic", Mnemonic("english"))
+        default = getattr(self.config, "mnemonic_default_words", 24)
+        if default not in self._WORD_COUNT_TO_STRENGTH:
+            raise ValueError(
+                "mnemonic_default_words must be one of: "
+                f"{sorted(self._WORD_COUNT_TO_STRENGTH)}"
+            )
+        object.__setattr__(self, "_default_word_count", default)
 
-    def generate(self) -> str:
-        return self._mnemonic.generate(strength=self.config.mnemonic_strength_bits)
+    @property
+    def default_word_count(self) -> int:
+        return self._default_word_count
+
+    @classmethod
+    def valid_word_counts(cls) -> tuple[int, ...]:
+        return tuple(sorted(cls._WORD_COUNT_TO_STRENGTH))
+
+    def generate(self, word_count: int | None = None) -> str:
+        if word_count is None:
+            word_count = self._default_word_count
+        try:
+            strength = self._WORD_COUNT_TO_STRENGTH[word_count]
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                "word_count must be one of: "
+                f"{sorted(self._WORD_COUNT_TO_STRENGTH)}"
+            ) from exc
+        return self._mnemonic.generate(strength=strength)
 
     def validate(self, mnemonic: str) -> bool:
         return self._mnemonic.check(mnemonic)

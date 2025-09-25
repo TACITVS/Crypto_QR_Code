@@ -15,7 +15,7 @@ class AppConfig:
     pbkdf2_iterations: int = 600_000
     salt_size_bytes: int = 16
     aes_key_size_bytes: int = 32
-    mnemonic_strength_bits: int = 256
+    mnemonic_default_words: int = 24
     network_check_interval_ms: int = 5_000
     camera_frame_skip: int = 5
     qr_error_correction: str = "M"
