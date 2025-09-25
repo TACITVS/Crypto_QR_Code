@@ -56,7 +56,9 @@ importing the package in your own scripts.
 
 The cryptographic architecture, including the PBKDF2 parameters, AES-256-GCM
 usage and QR payload hashing strategy, is documented in
-[`docs/cryptography.md`](docs/cryptography.md).
+[`docs/cryptography.md`](docs/cryptography.md). For an implementation-agnostic
+description of the encryption and decryption protocol, including payload
+serialization rules, refer to [`docs/encryption_protocol.md`](docs/encryption_protocol.md).
 
 ## Tests
 

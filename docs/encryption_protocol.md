@@ -1,0 +1,120 @@
+# Secure QR Payload Protocol
+
+This document specifies the format and procedures that the Secure QR Code Tool
+uses to transform arbitrary UTF-8 text into an authenticated, encrypted payload.
+The intent is to make payloads interoperable across implementations, regardless
+of programming language or operating system.
+
+## Notation
+
+The keywords **MUST**, **MUST NOT**, **SHOULD** and **MAY** follow the meanings
+assigned by RFC 2119. All multi-byte integers are represented in network byte
+order (big endian) unless stated otherwise. When the text refers to base64 it
+uses the RFC 4648 “standard” alphabet without padding characters removed.
+
+## Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Cipher | AES-256-GCM | Authenticated encryption with a 128-bit tag |
+| Key derivation | PBKDF2-HMAC-SHA256 | Generates the 256-bit AES key |
+| PBKDF2 iterations | Implementation defined (default 600,000) | MUST be recorded with the payload when deviating from the default |
+| Salt size | 16 bytes | MUST be generated from a cryptographically secure RNG |
+| Nonce size | 12 bytes | MUST be generated from a cryptographically secure RNG |
+| Encoding | UTF-8 | Payload plaintext and metadata are UTF-8 |
+
+An implementation MAY choose higher iteration counts or longer salts, provided
+that all verifiers understand the configuration. Reducing the iteration count or
+the nonce length is NOT permitted.
+
+## Payload container
+
+Encrypted payloads are serialised as JSON dictionaries. A conforming
+implementation MUST produce the following keys:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Application or protocol version identifier |
+| `salt` | string | Base64 encoded salt used for PBKDF2 |
+| `nonce` | string | Base64 encoded AES-GCM nonce |
+| `ciphertext` | string | Base64 encoded AES-GCM ciphertext (includes tag) |
+
+No additional top-level keys are required, but producers MAY include metadata
+such as the PBKDF2 iteration count under vendor-specific names. Consumers MUST
+ignore unrecognised fields. The JSON dictionary MUST be encoded using UTF-8 when
+stored as text or embedded in QR codes.
+
+### Example payload
+
+```json
+{
+  "version": "1.0",
+  "salt": "9qrzpq4vERD1qzNNzjl4mA==",
+  "nonce": "bI8WmM4tF6pP2OG4",
+  "ciphertext": "uSBJ8pUTj8VhQ0Wvm0AxHkXaJq62g2jAh5q0VK8QG80="
+}
+```
+
+All base64 strings MUST be decoded before use. The ciphertext value includes the
+16-byte authentication tag produced by AES-GCM.
+
+## Encryption procedure
+
+Given a UTF-8 string `plaintext` and a password `password`, an implementation
+MUST perform the following steps:
+
+1. Generate a random 16-byte salt (`salt`).
+2. Derive a 32-byte key (`key`) by running PBKDF2-HMAC-SHA256 with the salt and
+the configured iteration count on the UTF-8 bytes of `password`.
+3. Generate a random 12-byte nonce (`nonce`).
+4. Encrypt the UTF-8 bytes of `plaintext` with AES-256-GCM using `key`, `nonce`
+and no additional authenticated data, producing `ciphertext` (which includes the
+GCM authentication tag).
+5. Base64 encode `salt`, `nonce` and `ciphertext`.
+6. Produce a JSON dictionary matching the schema described above.
+
+The salt and nonce MUST be unique per encryption invocation. Reusing either
+value with the same password leaks information and voids the integrity
+guarantees provided by AES-GCM.
+
+## Decryption procedure
+
+Given a JSON payload and a password, a conforming implementation MUST:
+
+1. Parse the JSON dictionary using UTF-8.
+2. Verify that the `salt`, `nonce` and `ciphertext` fields exist. If any are
+missing the payload MUST be rejected.
+3. Base64 decode the three fields into raw byte strings.
+4. Re-derive the AES key from the password and decoded salt using the same
+PBKDF2 parameters as the encrypting side.
+5. Attempt AES-256-GCM decryption with the derived key, decoded nonce and
+ciphertext. No additional authenticated data is supplied.
+6. If the AES-GCM authentication tag is invalid, the implementation MUST reject
+the payload and report an error.
+7. Convert the decrypted byte sequence to a UTF-8 string to obtain the original
+plaintext.
+
+Consumers SHOULD surface the `version` field to end users and MAY use it to
+select alternative parameters if the protocol evolves.
+
+## QR code considerations
+
+When encoding payloads into QR codes the JSON text MUST be serialised in UTF-8
+without binary packing. Producers SHOULD provide an external checksum (for
+example SHA-256 of the JSON text) so that recipients can validate scans before
+attempting decryption. This mirrors the helper exposed by the Secure QR Code
+Tool and improves robustness when QR codes are transcribed or stored offline.
+
+## Interoperability checklist
+
+Implementers can verify compliance by following this checklist:
+
+- [ ] Ensure salts and nonces come from a cryptographically secure RNG.
+- [ ] Confirm that the PBKDF2 iteration count matches the sender’s configuration.
+- [ ] Decode base64 values prior to decryption.
+- [ ] Enforce AES-GCM authentication tag validation.
+- [ ] Treat all JSON as UTF-8 text and preserve fields exactly as received.
+
+Following this specification guarantees that any party holding the password can
+reproduce the encryption and decryption process using standard cryptographic
+libraries.
