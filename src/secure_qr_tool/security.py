@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Iterable
 
+from argon2.low_level import Type as Argon2Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -72,9 +74,15 @@ class CryptoManager:
 
     config: AppConfig
 
-    def _derive_key(self, password: SecureString, salt: bytes) -> bytes:
-        """Derive an AES key from ``password`` using PBKDF2."""
+    _SUPPORTED_KDFS = ("argon2id", "pbkdf2")
 
+    def _normalise_kdf_name(self, name: str | None) -> str:
+        algorithm = (name or self.config.kdf_algorithm).strip().lower()
+        if algorithm not in self._SUPPORTED_KDFS:
+            raise ValueError(f"Unsupported KDF algorithm: {name}")
+        return algorithm
+
+    def _derive_key_pbkdf2(self, password: SecureString, salt: bytes) -> bytes:
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=self.config.aes_key_size_bytes,
@@ -84,6 +92,46 @@ class CryptoManager:
         )
         return kdf.derive(password.get_bytes())
 
+    def _derive_key_argon2(self, password: SecureString, salt: bytes) -> bytes:
+        return hash_secret_raw(
+            password.get_bytes(),
+            salt,
+            time_cost=self.config.argon2_time_cost,
+            memory_cost=self.config.argon2_memory_cost_kib,
+            parallelism=self.config.argon2_parallelism,
+            hash_len=self.config.aes_key_size_bytes,
+            type=Argon2Type.ID,
+        )
+
+    def _derive_key(
+        self, password: SecureString, salt: bytes, algorithm: str | None = None
+    ) -> bytes:
+        alg = self._normalise_kdf_name(algorithm)
+        if alg == "argon2id":
+            return self._derive_key_argon2(password, salt)
+        if alg == "pbkdf2":
+            return self._derive_key_pbkdf2(password, salt)
+        raise ValueError(f"Unsupported KDF algorithm: {alg}")
+
+    @staticmethod
+    def _build_aad(version: str, kdf_algorithm: str) -> bytes:
+        metadata = {
+            "cipher": "AES-256-GCM",
+            "kdf": kdf_algorithm,
+            "version": version,
+        }
+        return json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+
+    @staticmethod
+    def _dedupe_preserve_order(items: Iterable[str]) -> tuple[str, ...]:
+        seen: Dict[str, None] = {}
+        for item in items:
+            if item not in seen:
+                seen[item] = None
+        return tuple(seen)
+
     def encrypt(self, data: SecureString, password: SecureString) -> Dict[str, str]:
         """Encrypt ``data`` using AES-256-GCM.
 
@@ -92,16 +140,20 @@ class CryptoManager:
         """
 
         salt = os.urandom(self.config.salt_size_bytes)
-        key = self._derive_key(password, salt)
+        kdf_algorithm = self._normalise_kdf_name(None)
+        key = self._derive_key(password, salt, kdf_algorithm)
         aesgcm = AESGCM(key)
         nonce = os.urandom(12)
-        ciphertext = aesgcm.encrypt(nonce, data.get_bytes(), None)
+        version = self.config.app_version
+        aad = self._build_aad(version, kdf_algorithm)
+        ciphertext = aesgcm.encrypt(nonce, data.get_bytes(), aad)
 
         return {
             "salt": base64.b64encode(salt).decode("ascii"),
             "nonce": base64.b64encode(nonce).decode("ascii"),
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
-            "version": self.config.app_version,
+            "version": version,
+            "kdf": kdf_algorithm,
         }
 
     def decrypt(self, payload: Dict[str, str], password: SecureString) -> SecureString:
@@ -119,19 +171,36 @@ class CryptoManager:
         except (TypeError, binascii.Error) as exc:
             raise ValueError("Payload contains invalid base64 data") from exc
 
-        key = self._derive_key(password, salt)
-        aesgcm = AESGCM(key)
+        if len(nonce) != 12:
+            raise ValueError("Nonce must be 12 bytes for AES-GCM")
 
-        try:
-            plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-        except InvalidTag as exc:
-            raise ValueError("Decryption failed: authentication error") from exc
-        except ValueError as exc:
-            raise ValueError(f"Decryption failed: {exc}") from exc
-        except Exception as exc:  # pragma: no cover - defensive
-            raise ValueError("Decryption failed") from exc
+        version = payload.get("version", self.config.app_version)
+        preferred_algorithm = payload.get("kdf")
+        candidates = []
+        if preferred_algorithm is not None:
+            candidates.append(self._normalise_kdf_name(preferred_algorithm))
+        else:
+            candidates.append(self._normalise_kdf_name(None))
+            if self.config.kdf_algorithm.lower() != "pbkdf2":
+                candidates.append("pbkdf2")
 
-        return SecureString(plaintext)
+        last_error: Exception | None = None
+        for algorithm in self._dedupe_preserve_order(candidates):
+            key = self._derive_key(password, salt, algorithm)
+            aesgcm = AESGCM(key)
+            aad = self._build_aad(version, algorithm)
+            try:
+                plaintext = aesgcm.decrypt(nonce, ciphertext, aad)
+            except InvalidTag as exc:
+                last_error = exc
+                continue
+            except ValueError as exc:
+                raise ValueError(f"Decryption failed: {exc}") from exc
+            except Exception as exc:  # pragma: no cover - defensive
+                raise ValueError("Decryption failed") from exc
+            return SecureString(plaintext)
+
+        raise ValueError("Decryption failed: authentication error") from last_error
 
 
 @dataclass(slots=True)

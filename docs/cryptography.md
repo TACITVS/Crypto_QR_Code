@@ -7,23 +7,32 @@ application and how they interact with each other.
 
 ## Key Derivation
 
-* **Primitive** – PBKDF2-HMAC with SHA-256.
-* **Iterations** – Configurable via `AppConfig.pbkdf2_iterations` (default
-  600,000) to provide resistance against brute-force attempts.
+* **Default primitive** – Argon2id with parameters sourced from
+  `AppConfig`.
+  * `argon2_time_cost` – default 3 iterations.
+  * `argon2_memory_cost_kib` – default 128 MiB of memory.
+  * `argon2_parallelism` – default parallelism of 2 lanes.
+* **Compatibility primitive** – PBKDF2-HMAC-SHA256 remains available for
+  environments that lack Argon2 or that need deterministic parameters for
+  legacy payloads. The iteration count is still configurable through
+  `AppConfig.pbkdf2_iterations` (default 600,000).
 * **Salt** – Random 128-bit value generated with `os.urandom` for every
   encryption operation.
 * **Output size** – 256-bit key used directly by the AES-256-GCM cipher.
 
-The key derivation function is implemented in `CryptoManager._derive_key`.  The
-derived key material never leaves the scope of the encrypt/decrypt helpers.
+Key derivation happens inside `CryptoManager._derive_key`. Argon2id is used for
+new payloads, while the decryptor recognises and transparently handles older
+PBKDF2-based payloads. The derived key material never leaves the scope of the
+encrypt/decrypt helpers.
 
 ## Encryption and Authentication
 
 * **Cipher** – AES in Galois/Counter Mode (AES-256-GCM) via
   `cryptography.hazmat.primitives.ciphers.aead.AESGCM`.
 * **Nonce** – Random 96-bit value generated using `os.urandom`.
-* **Associated data** – None (the system relies on the built-in authentication
-  tag produced by GCM).
+* **Associated data** – A deterministic JSON document binding the cipher,
+  protocol version and selected KDF. Any modification to these fields causes the
+  authentication check to fail, preventing downgrade and mix-and-match attacks.
 * **Output payload** – JSON-serialisable dictionary containing base64-encoded
   salt, nonce and ciphertext as well as the application version.
 

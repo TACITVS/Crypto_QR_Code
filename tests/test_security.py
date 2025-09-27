@@ -10,7 +10,17 @@ from secure_qr_tool.security import CryptoManager, MnemonicManager, SecureString
 
 @pytest.fixture()
 def config() -> AppConfig:
-    return AppConfig(pbkdf2_iterations=10_000)
+    return AppConfig(
+        pbkdf2_iterations=10_000,
+        argon2_time_cost=1,
+        argon2_memory_cost_kib=32_768,
+        argon2_parallelism=1,
+    )
+
+
+@pytest.fixture()
+def pbkdf2_config() -> AppConfig:
+    return AppConfig(kdf_algorithm="pbkdf2", pbkdf2_iterations=10_000)
 
 
 def test_secure_string_clears_buffer():
@@ -24,7 +34,7 @@ def test_encrypt_roundtrip(config: AppConfig):
     crypto = CryptoManager(config)
     password = SecureString("A" * config.min_password_length)
     payload = crypto.encrypt(SecureString("mnemonic words"), password)
-    assert set(payload) == {"salt", "nonce", "ciphertext", "version"}
+    assert set(payload) == {"salt", "nonce", "ciphertext", "version", "kdf"}
 
     decrypted = crypto.decrypt(payload, password)
     assert decrypted.get() == "mnemonic words"
@@ -76,6 +86,30 @@ def test_decrypt_with_invalid_nonce_length(config: AppConfig):
         crypto.decrypt(payload, password)
 
     assert "Nonce" in str(excinfo.value) or "between" in str(excinfo.value)
+
+
+def test_decrypt_rejects_modified_version(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload = crypto.encrypt(SecureString("secret"), password)
+    payload["version"] = "tampered"
+
+    with pytest.raises(ValueError) as excinfo:
+        crypto.decrypt(payload, password)
+
+    assert "authentication error" in str(excinfo.value)
+
+
+def test_decrypts_legacy_pbkdf2_payload(config: AppConfig, pbkdf2_config: AppConfig):
+    password = SecureString("A" * config.min_password_length)
+    legacy_crypto = CryptoManager(pbkdf2_config)
+    payload = legacy_crypto.encrypt(SecureString("secret"), password)
+
+    modern_crypto = CryptoManager(config)
+    decrypted = modern_crypto.decrypt(payload, password)
+
+    assert payload["kdf"] == "pbkdf2"
+    assert decrypted.get() == "secret"
 
 
 def test_mnemonic_checksum_length(config: AppConfig):

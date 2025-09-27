@@ -8,8 +8,8 @@ security-critical code can be audited and unit tested independently.
 
 ## Features
 
-- **Strong encryption** – AES-256-GCM with PBKDF2-HMAC key derivation and a
-  configurable work factor.
+- **Strong encryption** – AES-256-GCM with Argon2id key derivation by default
+  (PBKDF2 remains available for compatibility) and configurable work factors.
 - **Mnemonic workflow** – generates 24-word recovery phrases using the
   `mnemonic` library and exposes checksum helpers.
 - **QR interoperability** – save encrypted payloads as QR code images when
@@ -54,8 +54,9 @@ importing the package in your own scripts.
 
 ## Cryptographic specification
 
-The cryptographic architecture, including the PBKDF2 parameters, AES-256-GCM
-usage and QR payload hashing strategy, is documented in
+The cryptographic architecture, including the Argon2id defaults, PBKDF2
+compatibility settings, AES-256-GCM usage and QR payload hashing strategy, is
+documented in
 [`docs/cryptography.md`](docs/cryptography.md). For an implementation-agnostic
 description of the encryption and decryption protocol, including payload
 serialization rules, refer to [`docs/encryption_protocol.md`](docs/encryption_protocol.md).
