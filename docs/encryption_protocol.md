@@ -17,7 +17,8 @@ uses the RFC 4648 “standard” alphabet without padding characters removed.
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | Cipher | AES-256-GCM | Authenticated encryption with a 128-bit tag |
-| Key derivation | PBKDF2-HMAC-SHA256 | Generates the 256-bit AES key |
+| Key derivation | Argon2id (default) or PBKDF2-HMAC-SHA256 | Generates the 256-bit AES key |
+| Argon2 parameters | Implementation defined (defaults: time cost 3, memory 128 MiB, parallelism 2) | MUST be recorded out-of-band when deviating from defaults |
 | PBKDF2 iterations | Implementation defined (default 600,000) | MUST be recorded with the payload when deviating from the default |
 | Salt size | 16 bytes | MUST be generated from a cryptographically secure RNG |
 | Nonce size | 12 bytes | MUST be generated from a cryptographically secure RNG |
@@ -35,14 +36,15 @@ implementation MUST produce the following keys:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Application or protocol version identifier |
-| `salt` | string | Base64 encoded salt used for PBKDF2 |
+| `salt` | string | Base64 encoded salt used for key derivation |
 | `nonce` | string | Base64 encoded AES-GCM nonce |
 | `ciphertext` | string | Base64 encoded AES-GCM ciphertext (includes tag) |
+| `kdf` | string | Lowercase algorithm label (`argon2id` or `pbkdf2`) |
 
 No additional top-level keys are required, but producers MAY include metadata
-such as the PBKDF2 iteration count under vendor-specific names. Consumers MUST
-ignore unrecognised fields. The JSON dictionary MUST be encoded using UTF-8 when
-stored as text or embedded in QR codes.
+such as the Argon2 parameters or PBKDF2 iteration count under vendor-specific
+names. Consumers MUST ignore unrecognised fields. The JSON dictionary MUST be
+encoded using UTF-8 when stored as text or embedded in QR codes.
 
 ### Example payload
 
@@ -51,7 +53,8 @@ stored as text or embedded in QR codes.
   "version": "1.0",
   "salt": "9qrzpq4vERD1qzNNzjl4mA==",
   "nonce": "bI8WmM4tF6pP2OG4",
-  "ciphertext": "uSBJ8pUTj8VhQ0Wvm0AxHkXaJq62g2jAh5q0VK8QG80="
+  "ciphertext": "uSBJ8pUTj8VhQ0Wvm0AxHkXaJq62g2jAh5q0VK8QG80=",
+  "kdf": "argon2id"
 }
 ```
 
@@ -64,12 +67,13 @@ Given a UTF-8 string `plaintext` and a password `password`, an implementation
 MUST perform the following steps:
 
 1. Generate a random 16-byte salt (`salt`).
-2. Derive a 32-byte key (`key`) by running PBKDF2-HMAC-SHA256 with the salt and
-the configured iteration count on the UTF-8 bytes of `password`.
+2. Derive a 32-byte key (`key`) using the configured KDF (Argon2id by default,
+   PBKDF2 when explicitly selected) with the salt and KDF-specific parameters on
+   the UTF-8 bytes of `password`.
 3. Generate a random 12-byte nonce (`nonce`).
 4. Encrypt the UTF-8 bytes of `plaintext` with AES-256-GCM using `key`, `nonce`
-and no additional authenticated data, producing `ciphertext` (which includes the
-GCM authentication tag).
+   and the additional authenticated data (AAD) described below, producing
+   `ciphertext` (which includes the GCM authentication tag).
 5. Base64 encode `salt`, `nonce` and `ciphertext`.
 6. Produce a JSON dictionary matching the schema described above.
 
@@ -85,10 +89,11 @@ Given a JSON payload and a password, a conforming implementation MUST:
 2. Verify that the `salt`, `nonce` and `ciphertext` fields exist. If any are
 missing the payload MUST be rejected.
 3. Base64 decode the three fields into raw byte strings.
-4. Re-derive the AES key from the password and decoded salt using the same
-PBKDF2 parameters as the encrypting side.
-5. Attempt AES-256-GCM decryption with the derived key, decoded nonce and
-ciphertext. No additional authenticated data is supplied.
+4. Determine the key derivation function from the `kdf` field (falling back to
+   the configured default if omitted) and re-derive the AES key using the same
+   parameters as the encrypting side.
+5. Attempt AES-256-GCM decryption with the derived key, decoded nonce and the
+   additional authenticated data (AAD) described below.
 6. If the AES-GCM authentication tag is invalid, the implementation MUST reject
 the payload and report an error.
 7. Convert the decrypted byte sequence to a UTF-8 string to obtain the original
@@ -96,6 +101,21 @@ plaintext.
 
 Consumers SHOULD surface the `version` field to end users and MAY use it to
 select alternative parameters if the protocol evolves.
+
+### Additional authenticated data
+
+Implementations MUST supply deterministic AAD to AES-GCM to bind protocol
+metadata to the encrypted payload. The AAD is a UTF-8 JSON object serialised
+with sorted keys and no whitespace, containing the following fields:
+
+```
+{"cipher":"AES-256-GCM","kdf":"<kdf>","version":"<version>"}
+```
+
+Any change to the cipher identifier, protocol version or advertised KDF will
+invalidate the authentication tag and MUST cause decryption to fail. This guards
+against downgrade attacks where an adversary attempts to replay ciphertext under
+different algorithm choices.
 
 ## QR code considerations
 
