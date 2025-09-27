@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QImage, QPixmap
@@ -147,7 +147,7 @@ class CameraWorker(QObject):  # pragma: no cover - requires Qt event loop
     """Background worker that streams frames from the system camera."""
 
     frame_captured = pyqtSignal(object)
-    decoded = pyqtSignal(str)
+    decoded = pyqtSignal(bytes)
     status = pyqtSignal(str)
     finished = pyqtSignal()
 
@@ -261,7 +261,7 @@ class CameraWorker(QObject):  # pragma: no cover - requires Qt event loop
         for processed in candidates:
             decoded = self._pyzbar.decode(processed)
             if decoded:
-                return decoded[0].data.decode("utf-8", errors="ignore")
+                return bytes(decoded[0].data)
         return None
 
 
@@ -560,14 +560,16 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
 
         self._app.start_crypto("encrypt", SecureString(mnemonic), self._state.master_password)
 
-    def handle_encrypted(self, payload: Dict[str, str]) -> None:
-        self._state.current_encrypted_payload = payload
+    def handle_encrypted(self, result: tuple[Dict[str, str], bytes]) -> None:
+        payload_dict, payload_bytes = result
+        self._state.current_encrypted_payload = payload_dict
+        self._state.current_encrypted_payload_bytes = payload_bytes
         if not self._qr.is_available():
             self._qr_preview.setText("QR generation not available")
             return
 
         try:
-            pixmap = self._qr.to_qpixmap(json.dumps(payload))
+            pixmap = self._qr.to_qpixmap(payload_bytes)
         except Exception as exc:
             self._qr_preview.setText(f"QR preview failed: {exc}")
             return
@@ -576,7 +578,7 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
         self._qr_preview.setPixmap(scaled)
 
     def _save_as_qr(self) -> None:
-        if not self._state.current_encrypted_payload:
+        if not self._state.current_encrypted_payload_bytes:
             QMessageBox.warning(self, "Error", "No data to save")
             return
 
@@ -585,7 +587,7 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
             return
 
         try:
-            self._qr.save_png(json.dumps(self._state.current_encrypted_payload), path)
+            self._qr.save_png(self._state.current_encrypted_payload_bytes, path)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Save failed: {exc}")
         else:
@@ -644,13 +646,22 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
             QMessageBox.critical(self, "Error", "Invalid JSON format - missing 'payload'")
             return
 
-        self._process_loaded_data(json.dumps(data["payload"]), f"Loaded: {Path(path).name}")
+        self._process_loaded_data(data["payload"], f"Loaded: {Path(path).name}")
 
-    def _process_loaded_data(self, payload: str, source: str) -> None:
-        try:
-            payload_dict = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            QMessageBox.critical(self, "Error", f"Invalid JSON data: {exc}")
+    def _process_loaded_data(self, payload: object, source: str) -> None:
+        processed: object = payload
+        if isinstance(payload, str):
+            try:
+                processed = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                QMessageBox.critical(self, "Error", f"Invalid JSON data: {exc}")
+                return
+        elif isinstance(payload, Mapping):
+            processed = dict(payload)
+        elif isinstance(payload, (bytes, bytearray)):
+            processed = bytes(payload)
+        else:
+            QMessageBox.critical(self, "Error", "Unsupported payload format")
             return
 
         self._loaded_label.setText(source)
@@ -659,7 +670,7 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
             QMessageBox.critical(self, "Error", "No master password set")
             return
 
-        self._app.start_crypto("decrypt", payload_dict, self._state.master_password)
+        self._app.start_crypto("decrypt", processed, self._state.master_password)
 
     def handle_decrypted(self, result: SecureString) -> None:
         try:
@@ -726,7 +737,7 @@ class MainWindow(QWidget):  # pragma: no cover - requires Qt event loop
             pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._camera_display.setPixmap(pixmap)
 
-    def _on_camera_decoded(self, payload: str) -> None:
+    def _on_camera_decoded(self, payload: bytes) -> None:
         if self._camera_status:
             self._camera_status.setText("QR detected – decrypting…")
         self._stop_camera()
@@ -883,6 +894,7 @@ class SecureQRApp(QMainWindow):  # pragma: no cover - requires Qt event loop
             self._state.master_password.clear()
         self._state.master_password = None
         self._state.current_encrypted_payload = None
+        self._state.current_encrypted_payload_bytes = None
         event.accept()
 
 
