@@ -22,7 +22,14 @@ class QRCodeManager:
             return False
         return True
 
-    def payload_digest(self, data: bytes) -> str:
+    def _ensure_bytes(self, payload: bytes | bytearray | str) -> bytes:
+        """Return ``payload`` as ``bytes`` for QR operations."""
+
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload)
+        return payload.encode("utf-8")
+
+    def payload_digest(self, data: bytes | bytearray | str) -> str:
         """Return the SHA-256 digest of the QR payload.
 
         The digest allows callers to verify that a decoded payload matches the
@@ -31,9 +38,9 @@ class QRCodeManager:
         workflow.
         """
 
-        return hashlib.sha256(data).hexdigest()
+        return hashlib.sha256(self._ensure_bytes(data)).hexdigest()
 
-    def save_png(self, data: bytes, path: str) -> str:
+    def save_png(self, data: bytes | bytearray | str, path: str) -> str:
         """Persist a QR code representing ``data`` to ``path``.
 
         The method returns the SHA-256 digest of ``data`` so that callers can
@@ -45,12 +52,13 @@ class QRCodeManager:
         except Exception as exc:  # pragma: no cover - depends on environment
             raise RuntimeError("QR generation requires segno; install segno[pil]") from exc
 
-        qr = segno.make(data, error=self.config.qr_error_correction)
+        payload = self._ensure_bytes(data)
+        qr = segno.make(payload, error=self.config.qr_error_correction)
         qr.save(path, scale=self.config.qr_scale, border=self.config.qr_border)
 
-        return self.payload_digest(data)
+        return self.payload_digest(payload)
 
-    def to_qpixmap(self, data: bytes):  # pragma: no cover - requires PyQt at runtime
+    def to_qpixmap(self, data: bytes | bytearray | str):  # pragma: no cover - requires PyQt at runtime
         """Return a ``QPixmap`` representing ``data``.
 
         The method imports :mod:`PyQt5` lazily to keep the module usable in
@@ -68,7 +76,8 @@ class QRCodeManager:
         except Exception as exc:  # pragma: no cover - depends on environment
             raise RuntimeError("QR generation requires segno; install segno[pil]") from exc
 
-        qr = segno.make(data, error=self.config.qr_error_correction)
+        payload = self._ensure_bytes(data)
+        qr = segno.make(payload, error=self.config.qr_error_correction)
         buffer = io.BytesIO()
         qr.save(buffer, kind="png", scale=self.config.qr_scale, border=self.config.qr_border)
         buffer.seek(0)

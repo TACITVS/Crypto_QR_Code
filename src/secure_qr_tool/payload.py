@@ -12,6 +12,9 @@ FORMAT_VERSION = 1
 _HEADER = struct.Struct(">BBHHHI")
 """Header structure: version, kdf enum, version len, salt len, nonce len, ciphertext len."""
 
+_IGNORABLE_SUFFIX = {0x09, 0x0A, 0x0D, 0x20}
+"""ASCII whitespace bytes ignored when decoding (``\t``, ``\n``, ``\r``, space)."""
+
 _KDF_TO_CODE = {"argon2id": 1, "pbkdf2": 2}
 _CODE_TO_KDF = {value: key for key, value in _KDF_TO_CODE.items()}
 
@@ -21,6 +24,15 @@ def _ensure_kdf_code(kdf: str) -> int:
         return _KDF_TO_CODE[kdf]
     except KeyError as exc:  # pragma: no cover - defensive guard
         raise ValueError(f"Unsupported KDF: {kdf}") from exc
+
+
+def _rstrip_ignorable(data: bytes) -> bytes:
+    """Strip ASCII whitespace permitted at the end of a binary payload."""
+
+    end = len(data)
+    while end and data[end - 1] in _IGNORABLE_SUFFIX:
+        end -= 1
+    return data[:end]
 
 
 def encode_components(
@@ -72,9 +84,15 @@ def encode_payload(payload: Mapping[str, str]) -> bytes:
     )
 
 
-def decode_payload(data: bytes) -> Dict[str, str]:
-    """Decode binary payload data back into the JSON-friendly dictionary."""
+def decode_components(container: bytes) -> Dict[str, object]:
+    """Parse ``container`` into its raw payload parts.
 
+    The returned dictionary mirrors :func:`encode_components` but keeps the salt,
+    nonce and ciphertext as :class:`bytes` so that callers can decide how to
+    serialise them (e.g. base64 for JSON compatibility).
+    """
+
+    data = _rstrip_ignorable(container)
     if len(data) < _HEADER.size:
         raise ValueError("Binary payload is truncated")
 
@@ -110,49 +128,43 @@ def decode_payload(data: bytes) -> Dict[str, str]:
     except UnicodeDecodeError as exc:
         raise ValueError("Version field is not valid UTF-8") from exc
 
-    salt = data[end_version:end_salt]
-    nonce = data[end_salt:end_nonce]
-    ciphertext = data[end_nonce:end_ciphertext]
-
     return {
         "version": version,
         "kdf": kdf,
-        "salt": base64.b64encode(salt).decode("ascii"),
-        "nonce": base64.b64encode(nonce).decode("ascii"),
-        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "salt": data[end_version:end_salt],
+        "nonce": data[end_salt:end_nonce],
+        "ciphertext": data[end_nonce:end_ciphertext],
+    }
+
+
+def decode_payload(data: bytes) -> Dict[str, str]:
+    """Decode binary payload data back into the JSON-friendly dictionary."""
+
+    components = decode_components(data)
+    return {
+        "version": components["version"],
+        "kdf": components["kdf"],
+        "salt": base64.b64encode(components["salt"]).decode("ascii"),
+        "nonce": base64.b64encode(components["nonce"]).decode("ascii"),
+        "ciphertext": base64.b64encode(components["ciphertext"]).decode("ascii"),
     }
 
 
 def is_binary_payload(data: bytes) -> bool:
     """Return ``True`` if the data appears to use the binary payload format."""
 
-    if len(data) < _HEADER.size:
-        return False
-
     try:
-        (
-            format_version,
-            kdf_code,
-            version_len,
-            salt_len,
-            nonce_len,
-            ciphertext_len,
-        ) = _HEADER.unpack_from(data)
-    except struct.error:  # pragma: no cover - defensive guard
+        decode_components(data)
+    except ValueError:
         return False
-
-    if format_version != FORMAT_VERSION or kdf_code not in _CODE_TO_KDF:
-        return False
-
-    expected_len = _HEADER.size + version_len + salt_len + nonce_len + ciphertext_len
-    return expected_len == len(data)
+    return True
 
 
 __all__ = [
     "FORMAT_VERSION",
     "encode_components",
     "encode_payload",
+    "decode_components",
     "decode_payload",
     "is_binary_payload",
 ]
-

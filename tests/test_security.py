@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import base64
 import json
 
@@ -46,6 +44,30 @@ def test_encrypt_roundtrip(config: AppConfig):
     assert decrypted.get() == "mnemonic words"
     decrypted_bytes = crypto.decrypt(payload_bytes, password)
     assert decrypted_bytes.get() == "mnemonic words"
+
+
+def test_binary_payload_with_trailing_whitespace(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload_dict, payload_bytes = crypto.encrypt(SecureString("extra"), password)
+
+    augmented = payload_bytes + b"\n"
+    assert is_binary_payload(augmented)
+    assert decode_payload(augmented) == payload_dict
+
+    decrypted = crypto.decrypt(augmented, password)
+    assert decrypted.get() == "extra"
+
+
+def test_binary_payload_rejects_non_whitespace_suffix(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    _, payload_bytes = crypto.encrypt(SecureString("garbage"), password)
+
+    tampered = payload_bytes + b"XYZ"
+    assert not is_binary_payload(tampered)
+    with pytest.raises(ValueError):
+        decode_payload(tampered)
 
 
 def test_decrypt_rejects_invalid_payload(config: AppConfig):
