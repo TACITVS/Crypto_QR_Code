@@ -159,15 +159,12 @@ def decode_payload(data: bytes) -> Dict[str, str]:
 def is_binary_payload(data: bytes) -> bool:
     """Return ``True`` if the data appears to use the binary payload format."""
 
-    if len(data) < _HEADER.size:
-        return False
-
     try:
         (
-            version_len,
-            salt_len,
-            nonce_len,
-            ciphertext_len,
+            _version_len,
+            _salt_len,
+            _nonce_len,
+            _ciphertext_len,
             end_ciphertext,
             _kdf,
         ) = _split_payload_sections(data)
