@@ -10,7 +10,7 @@ from secure_qr_tool.qr import QRCodeManager
 
 def test_payload_digest_matches_sha256():
     manager = QRCodeManager(AppConfig())
-    payload = json.dumps({"salt": "abc", "nonce": "def"})
+    payload = json.dumps({"salt": "abc", "nonce": "def"}).encode("utf-8")
 
     digest = manager.payload_digest(payload)
 
@@ -32,7 +32,7 @@ def test_save_png_returns_digest(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "segno", module)
 
     manager = QRCodeManager(AppConfig())
-    data = "payload"
+    data = b"payload"
     digest = manager.save_png(data, str(tmp_path / "qr.png"))
 
     assert digest == manager.payload_digest(data)
