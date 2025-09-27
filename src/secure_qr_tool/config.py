@@ -11,6 +11,7 @@ class AppConfig:
 
     app_name: str = "SecureQRCodeTool"
     app_version: str = "3.0"
+    repo_url: str = "https://github.com/TACITVS/Crypto_QR_Code"
     min_password_length: int = 12
     kdf_algorithm: str = "argon2id"
     pbkdf2_iterations: int = 600_000

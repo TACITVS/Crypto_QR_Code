@@ -73,11 +73,14 @@ class QRCodeManager:
 
         return hashlib.sha256(self._ensure_bytes(data)).hexdigest()
 
-    def save_png(self, data: bytes | bytearray | str, path: str) -> str:
-        """Persist a QR code representing ``data`` to ``path``.
+    def _render_qr_png(self, payload: bytes) -> bytes:
+        """Return a PNG image representing ``payload``.
 
-        The method returns the SHA-256 digest of ``data`` so that callers can
-        display or record the checksum alongside the generated QR image.
+        The function attempts to decorate the QR code with a frame that
+        advertises the repository URL.  When Pillow or the extra drawing
+        primitives are not available the method falls back to ``segno``'s
+        native ``save`` implementation so the caller still receives a valid
+        image.
         """
 
         try:
@@ -85,10 +88,87 @@ class QRCodeManager:
         except Exception as exc:  # pragma: no cover - depends on environment
             raise RuntimeError("QR generation requires segno; install segno[pil]") from exc
 
-        payload = self._ensure_bytes(data)
         qr_data = self._encode_for_qr(payload)
         qr = segno.make(qr_data, error=self.config.qr_error_correction)
-        qr.save(path, scale=self.config.qr_scale, border=self.config.qr_border)
+        repo_text = getattr(self.config, "repo_url", "").strip()
+
+        if repo_text:
+            try:  # pragma: no cover - depends on optional Pillow runtime
+                from PIL import Image, ImageDraw, ImageFont
+
+                base_img = qr.to_pil(scale=self.config.qr_scale, border=self.config.qr_border)
+                base_img = base_img.convert("RGB")
+
+                font_size = max(14, base_img.size[0] // 18)
+                try:
+                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                except Exception:
+                    font = ImageFont.load_default()
+
+                drawer = ImageDraw.Draw(base_img)
+                try:
+                    bbox = drawer.textbbox((0, 0), repo_text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                except AttributeError:  # pragma: no cover - Pillow compatibility
+                    text_width, text_height = drawer.textsize(repo_text, font=font)
+
+                extra_vertical = max(0, text_width - base_img.height)
+                margin = max(
+                    text_height + font_size // 2,
+                    base_img.width // 18,
+                    (extra_vertical // 2) + text_height + 5,
+                )
+
+                canvas_width = base_img.width + 2 * margin
+                canvas_height = base_img.height + 2 * margin
+                canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+                canvas.paste(base_img, (margin, margin))
+
+                draw = ImageDraw.Draw(canvas)
+                top_x = (canvas_width - text_width) // 2
+                top_y = (margin - text_height) // 2
+                draw.text((top_x, top_y), repo_text, fill="black", font=font)
+
+                bottom_y = canvas_height - margin + (margin - text_height) // 2
+                draw.text((top_x, bottom_y), repo_text, fill="black", font=font)
+
+                text_image = Image.new("RGBA", (text_width, text_height), (255, 255, 255, 0))
+                ImageDraw.Draw(text_image).text((0, 0), repo_text, fill="black", font=font)
+                left_img = text_image.rotate(90, expand=True)
+                right_img = text_image.rotate(-90, expand=True)
+
+                left_x = (margin - left_img.width) // 2
+                left_y = (canvas_height - left_img.height) // 2
+                canvas.paste(left_img, (left_x, left_y), left_img)
+
+                right_x = canvas_width - margin + (margin - right_img.width) // 2
+                canvas.paste(right_img, (right_x, left_y), right_img)
+
+                buffer = io.BytesIO()
+                canvas.save(buffer, format="PNG")
+                buffer.seek(0)
+                return buffer.read()
+            except Exception:
+                pass
+
+        buffer = io.BytesIO()
+        qr.save(buffer, kind="png", scale=self.config.qr_scale, border=self.config.qr_border)
+        buffer.seek(0)
+        return buffer.read()
+
+    def save_png(self, data: bytes | bytearray | str, path: str) -> str:
+        """Persist a QR code representing ``data`` to ``path``.
+
+        The method returns the SHA-256 digest of ``data`` so that callers can
+        display or record the checksum alongside the generated QR image.
+        """
+
+        payload = self._ensure_bytes(data)
+        png_bytes = self._render_qr_png(payload)
+
+        with open(path, "wb") as handle:
+            handle.write(png_bytes)
 
         return self.payload_digest(payload)
 
@@ -105,17 +185,8 @@ class QRCodeManager:
         except Exception as exc:  # pragma: no cover - depends on environment
             raise RuntimeError("PyQt5 is required to generate a preview pixmap") from exc
 
-        try:
-            import segno  # type: ignore  # pragma: no cover - optional dependency
-        except Exception as exc:  # pragma: no cover - depends on environment
-            raise RuntimeError("QR generation requires segno; install segno[pil]") from exc
-
         payload = self._ensure_bytes(data)
-        qr_data = self._encode_for_qr(payload)
-        qr = segno.make(qr_data, error=self.config.qr_error_correction)
-        buffer = io.BytesIO()
-        qr.save(buffer, kind="png", scale=self.config.qr_scale, border=self.config.qr_border)
-        buffer.seek(0)
+        buffer = io.BytesIO(self._render_qr_png(payload))
 
         image = QImage()
         if not image.loadFromData(buffer.read()):
