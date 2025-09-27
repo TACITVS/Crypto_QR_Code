@@ -105,12 +105,17 @@ def decode_payload(data: bytes) -> Dict[str, str]:
         raise ValueError("Binary payload length mismatch")
 
     version_bytes = data[offset:end_version]
+    try:
+        version = version_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Version field is not valid UTF-8") from exc
+
     salt = data[end_version:end_salt]
     nonce = data[end_salt:end_nonce]
     ciphertext = data[end_nonce:end_ciphertext]
 
     return {
-        "version": version_bytes.decode("utf-8"),
+        "version": version,
         "kdf": kdf,
         "salt": base64.b64encode(salt).decode("ascii"),
         "nonce": base64.b64encode(nonce).decode("ascii"),
