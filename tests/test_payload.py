@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from secure_qr_tool.payload import decode_payload, encode_components
+from secure_qr_tool.payload import decode_payload, encode_components, is_binary_payload
 
 
 @pytest.fixture()
@@ -55,3 +55,15 @@ def test_decode_payload_base64_roundtrip(sample_components):
     assert base64.b64decode(payload["salt"]) == sample_components["salt"]
     assert base64.b64decode(payload["nonce"]) == sample_components["nonce"]
     assert base64.b64decode(payload["ciphertext"]) == sample_components["ciphertext"]
+
+
+def test_decode_payload_ignores_trailing_nul(sample_components):
+    binary = encode_components(**sample_components)
+    padded = binary + b"\x00"
+
+    assert is_binary_payload(padded)
+
+    payload = decode_payload(padded)
+
+    assert payload["version"] == sample_components["version"]
+    assert payload["kdf"] == sample_components["kdf"]
