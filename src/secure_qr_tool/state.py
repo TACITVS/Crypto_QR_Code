@@ -11,6 +11,7 @@ class AppState:
 
     master_password: Optional["SecureString"] = None
     current_encrypted_payload: Optional[Dict[str, str]] = None
+    current_encrypted_payload_bytes: Optional[bytes] = None
     is_online: bool = False
     camera_available: bool = False
     qr_available: bool = False

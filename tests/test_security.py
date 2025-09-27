@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
 from secure_qr_tool.config import AppConfig
+from secure_qr_tool.payload import decode_payload, encode_payload, is_binary_payload
 from secure_qr_tool.security import CryptoManager, MnemonicManager, SecureString
 
 
@@ -33,11 +35,41 @@ def test_secure_string_clears_buffer():
 def test_encrypt_roundtrip(config: AppConfig):
     crypto = CryptoManager(config)
     password = SecureString("A" * config.min_password_length)
-    payload = crypto.encrypt(SecureString("mnemonic words"), password)
-    assert set(payload) == {"salt", "nonce", "ciphertext", "version", "kdf"}
+    payload_dict, payload_bytes = crypto.encrypt(SecureString("mnemonic words"), password)
+    assert set(payload_dict) == {"salt", "nonce", "ciphertext", "version", "kdf"}
+    assert isinstance(payload_bytes, bytes)
+    assert is_binary_payload(payload_bytes)
+    assert encode_payload(payload_dict) == payload_bytes
+    assert decode_payload(payload_bytes) == payload_dict
 
-    decrypted = crypto.decrypt(payload, password)
+    decrypted = crypto.decrypt(payload_dict, password)
     assert decrypted.get() == "mnemonic words"
+    decrypted_bytes = crypto.decrypt(payload_bytes, password)
+    assert decrypted_bytes.get() == "mnemonic words"
+
+
+def test_binary_payload_with_trailing_whitespace(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload_dict, payload_bytes = crypto.encrypt(SecureString("extra"), password)
+
+    augmented = payload_bytes + b"\n"
+    assert is_binary_payload(augmented)
+    assert decode_payload(augmented) == payload_dict
+
+    decrypted = crypto.decrypt(augmented, password)
+    assert decrypted.get() == "extra"
+
+
+def test_binary_payload_rejects_non_whitespace_suffix(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    _, payload_bytes = crypto.encrypt(SecureString("garbage"), password)
+
+    tampered = payload_bytes + b"XYZ"
+    assert not is_binary_payload(tampered)
+    with pytest.raises(ValueError):
+        decode_payload(tampered)
 
 
 def test_decrypt_rejects_invalid_payload(config: AppConfig):
@@ -67,7 +99,7 @@ def test_decrypt_rejects_invalid_base64(config: AppConfig):
 def test_decrypt_with_wrong_password(config: AppConfig):
     crypto = CryptoManager(config)
     password = SecureString("A" * config.min_password_length)
-    payload = crypto.encrypt(SecureString("secret"), password)
+    payload, _ = crypto.encrypt(SecureString("secret"), password)
 
     wrong_password = SecureString("B" * config.min_password_length)
     with pytest.raises(ValueError) as excinfo:
@@ -79,7 +111,7 @@ def test_decrypt_with_wrong_password(config: AppConfig):
 def test_decrypt_with_invalid_nonce_length(config: AppConfig):
     crypto = CryptoManager(config)
     password = SecureString("A" * config.min_password_length)
-    payload = crypto.encrypt(SecureString("secret"), password)
+    payload, _ = crypto.encrypt(SecureString("secret"), password)
     payload["nonce"] = base64.b64encode(b"short").decode("ascii")
 
     with pytest.raises(ValueError) as excinfo:
@@ -91,7 +123,7 @@ def test_decrypt_with_invalid_nonce_length(config: AppConfig):
 def test_decrypt_rejects_modified_version(config: AppConfig):
     crypto = CryptoManager(config)
     password = SecureString("A" * config.min_password_length)
-    payload = crypto.encrypt(SecureString("secret"), password)
+    payload, _ = crypto.encrypt(SecureString("secret"), password)
     payload["version"] = "tampered"
 
     with pytest.raises(ValueError) as excinfo:
@@ -103,13 +135,28 @@ def test_decrypt_rejects_modified_version(config: AppConfig):
 def test_decrypts_legacy_pbkdf2_payload(config: AppConfig, pbkdf2_config: AppConfig):
     password = SecureString("A" * config.min_password_length)
     legacy_crypto = CryptoManager(pbkdf2_config)
-    payload = legacy_crypto.encrypt(SecureString("secret"), password)
+    payload, _ = legacy_crypto.encrypt(SecureString("secret"), password)
 
     modern_crypto = CryptoManager(config)
     decrypted = modern_crypto.decrypt(payload, password)
 
     assert payload["kdf"] == "pbkdf2"
     assert decrypted.get() == "secret"
+
+
+def test_decrypt_accepts_legacy_json_payload(config: AppConfig):
+    crypto = CryptoManager(config)
+    password = SecureString("A" * config.min_password_length)
+    payload_dict, payload_bytes = crypto.encrypt(SecureString("legacy"), password)
+
+    json_payload = json.dumps(payload_dict)
+    decrypted = crypto.decrypt(json_payload, password)
+    assert decrypted.get() == "legacy"
+
+    json_bytes = json_payload.encode("utf-8")
+    assert not is_binary_payload(json_bytes)
+    decrypted_bytes = crypto.decrypt(json_bytes, password)
+    assert decrypted_bytes.get() == "legacy"
 
 
 def test_mnemonic_checksum_length(config: AppConfig):

@@ -22,7 +22,7 @@ class QRCodeManager:
             return False
         return True
 
-    def payload_digest(self, data: str) -> str:
+    def payload_digest(self, data: bytes) -> str:
         """Return the SHA-256 digest of the QR payload.
 
         The digest allows callers to verify that a decoded payload matches the
@@ -31,9 +31,9 @@ class QRCodeManager:
         workflow.
         """
 
-        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+        return hashlib.sha256(data).hexdigest()
 
-    def save_png(self, data: str, path: str) -> str:
+    def save_png(self, data: bytes, path: str) -> str:
         """Persist a QR code representing ``data`` to ``path``.
 
         The method returns the SHA-256 digest of ``data`` so that callers can
@@ -50,7 +50,7 @@ class QRCodeManager:
 
         return self.payload_digest(data)
 
-    def to_qpixmap(self, data: str):  # pragma: no cover - requires PyQt at runtime
+    def to_qpixmap(self, data: bytes):  # pragma: no cover - requires PyQt at runtime
         """Return a ``QPixmap`` representing ``data``.
 
         The method imports :mod:`PyQt5` lazily to keep the module usable in
@@ -79,7 +79,7 @@ class QRCodeManager:
 
         return QPixmap.fromImage(image)
 
-    def read_from_file(self, path: str) -> Optional[str]:  # pragma: no cover - requires optional deps
+    def read_from_file(self, path: str) -> Optional[bytes]:  # pragma: no cover - requires optional deps
         """Decode QR contents using OpenCV and :mod:`pyzbar` when available."""
 
         try:
@@ -100,7 +100,7 @@ class QRCodeManager:
         ):
             decoded = pyzbar.decode(processed)
             if decoded:
-                return decoded[0].data.decode("utf-8", errors="ignore")
+                return bytes(decoded[0].data)
 
         return None
 
