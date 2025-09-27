@@ -18,6 +18,16 @@ def test_payload_digest_matches_sha256():
     assert len(digest) == 64
 
 
+def test_payload_digest_accepts_text():
+    manager = QRCodeManager(AppConfig())
+    payload = json.dumps({"ciphertext": "value"})
+
+    digest_from_text = manager.payload_digest(payload)
+    digest_from_bytes = manager.payload_digest(payload.encode("utf-8"))
+
+    assert digest_from_text == digest_from_bytes
+
+
 def test_save_png_returns_digest(monkeypatch, tmp_path):
     """``save_png`` should return the digest even when segno is mocked."""
 
