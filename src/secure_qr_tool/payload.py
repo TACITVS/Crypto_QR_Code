@@ -119,6 +119,7 @@ def decode_components(container: bytes) -> Dict[str, object]:
     end_nonce = end_salt + nonce_len
     end_ciphertext = end_nonce + ciphertext_len
 
+
     if end_ciphertext != len(data):
         raise ValueError("Binary payload length mismatch")
 
