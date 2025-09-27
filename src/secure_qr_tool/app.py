@@ -261,7 +261,7 @@ class CameraWorker(QObject):  # pragma: no cover - requires Qt event loop
         for processed in candidates:
             decoded = self._pyzbar.decode(processed)
             if decoded:
-                return bytes(decoded[0].data)
+                return QRCodeManager.decode_qr_payload(decoded[0].data)
         return None
 
 

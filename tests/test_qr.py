@@ -46,3 +46,18 @@ def test_save_png_returns_digest(monkeypatch, tmp_path):
     digest = manager.save_png(data, str(tmp_path / "qr.png"))
 
     assert digest == manager.payload_digest(data)
+
+
+def test_decode_qr_payload_prefers_base64():
+    manager = QRCodeManager(AppConfig())
+    payload = b"\x00binary-data\xff"
+    encoded = manager._encode_for_qr(payload)
+
+    assert manager.decode_qr_payload(encoded) == payload
+
+
+def test_decode_qr_payload_falls_back_to_raw_bytes():
+    manager = QRCodeManager(AppConfig())
+    payload = b"not-base64\x00\xff"
+
+    assert manager.decode_qr_payload(payload) == payload
