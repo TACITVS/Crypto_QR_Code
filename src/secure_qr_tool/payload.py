@@ -12,8 +12,16 @@ FORMAT_VERSION = 1
 _HEADER = struct.Struct(">BBHHHI")
 """Header structure: version, kdf enum, version len, salt len, nonce len, ciphertext len."""
 
-_IGNORABLE_SUFFIX = {0x09, 0x0A, 0x0D, 0x20}
-"""ASCII whitespace bytes ignored when decoding (``\t``, ``\n``, ``\r``, space)."""
+_IGNORABLE_SUFFIX = {0x00, 0x09, 0x0A, 0x0D, 0x20}
+"""Suffix bytes ignored when decoding binary payloads.
+
+The QR decoding libraries used by the application occasionally append a
+trailing NUL byte (``0x00``) to the extracted binary data.  The original
+implementation only stripped ASCII whitespace which caused legitimate QR
+payloads to be rejected as malformed.  Including ``0x00`` in the ignored
+set keeps the strict length checks for the actual payload while being
+resilient to this common decoder quirk.
+"""
 
 _KDF_TO_CODE = {"argon2id": 1, "pbkdf2": 2}
 _CODE_TO_KDF = {value: key for key, value in _KDF_TO_CODE.items()}
